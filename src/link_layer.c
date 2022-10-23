@@ -273,7 +273,16 @@ int llread(unsigned char *packet){
 ////////////////////////////////////////////////
 int llclose(int showStatistics)
 {
-    // TODO
+    if(l.role == TRANSMITTER){
+        sendFrame(SET_A, 0x0B, TRUE);
+        receiveFrame(RECEIVER, 0x0B);
+        sendFrame(SET_A, UA_C, FALSE);
+    }
+    else if(l.role == RECEIVER){
+        receiveFrame(TRANSMITTER, 0x0B);
+        sendFrame(UA_A, 0x0B, TRUE);
+        receiveFrame(TRANSMITTER, UA_C);
+    }
 
     return 1;
 }
