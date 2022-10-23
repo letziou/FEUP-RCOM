@@ -13,6 +13,24 @@
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define FLAG 0x7e
+#define ESCAPE 0x7D
+#define FLAG_PTR 0x5E
+#define ESCAPE_PTR 0x5D
+#define RR_CONTROL0 0x05
+#define RR_CONTROL1 0x85
+
+#define REJ_CONTROL0 0x01
+#define REJ_CONTROL1 0x81
+
+#define RR_POSITIVE_ACK 0x05
+#define REJ_NEGATIVE_ACK 0x01
+
+#define Info 1
+#define Setup 0
+
+//I frame
+#define CONTROL0 0x00
+#define CONTROL1 0x40
 
 
 // Receiver
@@ -37,7 +55,7 @@ typedef enum {
 int fd, alarmCount = 0;
 extern LinkLayer l;
 extern unsigned int alarmEnabled;
-extern int maxNTries;
+extern int maxNTries, sequenceNumber;
 
 void alarmHandler(int signal)   {
     alarmEnabled = FALSE;
@@ -130,6 +148,118 @@ void receiveFrame(int senderStatus, unsigned char ctr){
     } 
 }
 
+unsigned char *byteStuffing(unsigned char *frame, unsigned int *length){
+    unsigned char *stuffedFrame = (unsigned char *) malloc(*length);
+    unsigned int finalLenght = *length;
+
+    int j=0;
+    stuffedFrame[j++] = FLAG;
+
+    for(int i=1; i< *length - 1; i++){
+        if(frame[i] == FLAG){
+            stuffedFrame = (unsigned char *) realloc(stuffedFrame, ++finalLenght);
+            stuffedFrame[j] = ESCAPE;
+            stuffedFrame[++j] = FLAG_PTR;
+            j++;
+            continue;
+        }else if(frame[i] == ESCAPE){
+            stuffedFrame = (unsigned char *) realloc(stuffedFrame, ++finalLenght);
+            stuffedFrame[j] = ESCAPE;
+            stuffedFrame[++j] = ESCAPE_PTR;
+            j++;
+            continue;
+        }else{
+            stuffedFrame[j++] = frame[i];
+        }     
+    }
+
+    stuffedFrame[j] = FLAG;
+
+    *length=finalLenght;
+    return stuffedFrame;
+}
+
+void receiveRREJ(int fd, unsigned char rr_control, unsigned char rej_control, unsigned char *frame, unsigned int frameSize){
+
+    StateMachine receive = START;
+    int res;
+    unsigned char byte, controlByte;
+    int retransmit = TRUE;
+
+    while (receive != STOP) {
+        if (retransmit) {
+            if (l.nRetransmissions == 0) {
+                printf("No more retransmissions, leaving.\n");
+                return ;
+            }
+        res = write(fd, frame, frameSize);
+            l.nRetransmissions--;
+            alarm(l.timeout);
+            retransmit = FALSE;
+        }
+
+        res = read(fd, &byte, 1);
+        if (res < 0) {
+        perror("\nRECEIVING ERROR\n");
+        } else if (res == 0) {
+            res = write(fd, frame, frameSize);
+            res = read(fd, &byte, 1);
+        }
+
+        switch (receive) {
+        case START:
+            if (byte == FLAG)
+            receive = FLAG_RCV;
+            break;
+
+        case FLAG_RCV:
+            if (byte == UA_A) {
+            receive = A_RCV;
+            } else if (byte == FLAG) {
+            receive = FLAG_RCV;
+            } else
+            receive = START;
+            break;
+
+        case A_RCV:
+            if (byte == rr_control) {
+            controlByte = rr_control;
+            receive = C_RCV;
+            alarm(0);
+            } else if (byte == rej_control) {
+            controlByte = rej_control;
+            retransmit = TRUE;
+            l.nRetransmissions++;
+            } else if (byte == FLAG) {
+            receive = FLAG_RCV;
+            } else
+            receive = START;
+            break;
+
+        case C_RCV:
+            if (byte == (UA_A ^ controlByte)) {
+            receive = BCC_OK;
+            } else if (byte == FLAG) {
+            receive = FLAG_RCV;
+            } else {
+            receive = START;
+            }
+            break;
+        case BCC_OK:
+            if (byte == FLAG) {
+            receive = STOP;
+            alarm(0);
+            retransmit = FALSE;
+            } else
+            receive = START;
+            break;
+
+        default:
+            break;
+        }
+    }
+}
+
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
@@ -181,11 +311,56 @@ int llopen(LinkLayer connectionParameters)
 ////////////////////////////////////////////////
 // LLWRITE
 ////////////////////////////////////////////////
-int llwrite(const unsigned char *buf, int bufSize)
-{
-    // TODO
+int llwrite(const unsigned char *buf, int bufSize){
+    unsigned int totalLength = 6 + bufSize;
+    unsigned char IFrame[totalLength], BCC2, BBC;
+    int maxRetransmissions = l.nRetransmissions;
 
-    return 0;
+    IFrame[0] = FLAG;
+    IFrame[1] = SET_A;
+    if (sequenceNumber == 0) {
+        IFrame[2] = CONTROL0;
+    } 
+    else if (sequenceNumber == 1) {
+        IFrame[2] = CONTROL1;
+    }
+
+    IFrame[3] = IFrame[1] ^ IFrame[2];
+
+    int i;
+    IFrame[4] = buf[0];
+    BCC2 = IFrame[4];
+    for (i = 5; i < bufSize + 4; i++) {
+        IFrame[i] = buf[i - 4];
+        BCC2 = BCC2 ^ IFrame[i];
+    }
+
+    IFrame[totalLength - 2] = BCC2;
+    IFrame[totalLength - 1] = FLAG;
+
+    unsigned char *stuffedFrame = byteStuffing(IFrame, &totalLength);
+
+    BBC = stuffedFrame[totalLength -2];
+    int res = write(fd, stuffedFrame, totalLength);
+    printf("\nSENT FRAME\n");
+
+    stuffedFrame[totalLength - 2] = BBC;
+
+    alarm(l.timeout);
+
+    if(sequenceNumber == 0){
+        receiveRREJ(fd, RR_CONTROL1, REJ_CONTROL0, stuffedFrame, totalLength);
+        sequenceNumber = 1;
+    }
+    else if(sequenceNumber == 1){
+        receiveRREJ(fd, RR_CONTROL0, REJ_CONTROL1, stuffedFrame, totalLength);
+        sequenceNumber = 0;
+    }
+
+    free(stuffedFrame);
+
+    l.nRetransmissions = maxRetransmissions;
+    return res;
 }
 
 ////////////////////////////////////////////////
