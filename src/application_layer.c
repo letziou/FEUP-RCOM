@@ -21,16 +21,20 @@
 
 #define fragmentSize 256
 
-int sequenceNumber, maxNTries, file;
+int sequenceNumber, maxNTries, file, fileSize;
+unsigned char *fileData;
 unsigned int alarmEnabled;
 LinkLayer l;
 extern int fd;
 
 void sendData(const char *filename);
 int setFile(const char *filename);
-int getFileSize(FILE *file);
+int getFile(const char *filename);
 int sendControlPacket(unsigned char control, const char *filename);
 int sendPacket(int seqNumber, unsigned char* buf, int size);
+void ReceiveData(char *filename);
+int receiveControlPacket(const char *filename);
+int receivePacket(unsigned char **buffer, int seqNumber);
 
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)
@@ -107,6 +111,46 @@ void sendData(const char *filename){
     return ;
 }
 
+void ReceiveData(char *filename){
+    if(receiveControlPacket(filename) < 0){
+        printf("\nERROR IN receiveControlPackage\n");
+        return ;
+    }
+
+    int bytesRead = 0, seqNumber = 0, counter = 0;
+    unsigned char *buffer;
+
+    while(counter < fileSize){
+
+        bytesRead = receivePacket(&buffer, seqNumber);
+        if(bytesRead < 0){
+            printf("\nreceivePacket COULD NOT READ\n");
+            continue;
+        }
+
+        counter += bytesRead;
+        if(write(file, buffer, bytesRead) <= 0) {
+            printf("\nCOULD NOT WRITE TO FILE\n");
+        }
+
+        seqNumber++;
+        free(buffer);
+    }
+
+    if(receiveControlPacket(filename) < 0){
+        printf("\nERROR IN receiveControlPackage\n");;
+        return ;
+    }
+
+    if(close(file) < 0){
+        printf("\nERROR CLOSING FILE\n");
+        return ;
+    }
+
+    llclose(FALSE);
+    return ;
+}
+
 int setFile(const char *filename){
     if((file = open(filename, O_RDONLY)) < 0){
         printf("\nERROR OPENING FILE\n");
@@ -115,25 +159,13 @@ int setFile(const char *filename){
     return 0;
 }
 
-int getFileSize(FILE *file){
-    // saving current position
-    long int currentPosition = ftell(file);
+int getFile(const char *filename){
+    if((file = open(filename, O_CREAT|O_WRONLY|O_APPEND, S_IWUSR|S_IRUSR)) < 0) {
+    printf("\nERROR OPENING FILE\n");
+    return -1;
+  }
 
-    // seeking end of file
-    if (fseek(file, 0, SEEK_END) == -1)
-    {
-        printf("\nERROR: Could not get file size.\n");
-        return -1;
-    }
-
-    // saving file size
-    long int size = ftell(file);
-
-    // seeking to the previously saved position
-    fseek(file, 0, currentPosition);
-
-    // returning size
-    return size;
+  return 0;
 }
 
 int sendControlPacket(unsigned char control, const char *filename){
@@ -191,4 +223,89 @@ int sendPacket(int seqNumber, unsigned char* buf, int size){
         return -1;
     }
     return 0;
+}
+
+int receiveControlPacket(const char *filename){
+    unsigned char *read_packet;
+    unsigned int packet_size = llread(read_packet);
+
+    if(read_packet < 0){
+        printf("\nERROR READING\n");
+        return -1;
+    }
+
+    int index = 0;
+
+    if(read_packet[index] == CONTROLEND){
+        free(read_packet);
+        return 0;
+    }
+
+    index++;
+    unsigned int nBytes;
+    unsigned char type;
+
+    for(int i=0; i<2 ;i++){
+        type = read_packet[index++];
+
+        switch (type)
+        {
+        case CONTROL0:
+            nBytes = (unsigned int) read_packet[index++];
+            fileSize = *((off_t*) (read_packet + index));
+            fileData = (unsigned char *) malloc(fileSize);
+            index += nBytes;
+            break;
+        case CONTROL1:
+            nBytes = (unsigned int) read_packet[index++];
+            filename = (unsigned char*) malloc(nBytes + 1);
+            memcpy(filename, (char *)&read_packet[index++], nBytes+1);
+            getFile(filename);
+            break;
+        default:
+            printf("\nT parameter in start control packet couldn't be recognised\n");
+            break;
+        }
+    }
+
+    free(read_packet);
+    return 0;
+}
+
+int receivePacket(unsigned char **buffer, int seqNumber){
+    unsigned char *info;
+    int K = 0;
+
+    if(llread(info) < 0) {
+        printf("\nERROR IN llread\n");
+        return -1;
+    }
+
+    if(info == NULL){
+        printf("\nreceivePacket WITH NULL INFO\n");
+        return -1;
+    }
+
+    unsigned char C = info[0];
+    int N = info[1];
+
+    if(C != CONTROL1) {
+        printf("\nRECEIVEPACKET WITHOUT C RIGHT\n");
+        return -1;
+    }
+    if(N != seqNumber) {
+        printf("\nRECEIVEPACKET WRONG SEQNUMBER\n");
+        return -1;
+    }
+
+    int L2 = info[2];
+    int L1 = info[3];
+    K = 256 * L2 + L1;
+
+    *buffer = (unsigned char*) malloc(K);
+    memcpy((*buffer), (info + 4), K);
+
+    free(info);
+
+    return K;
 }
