@@ -56,10 +56,12 @@ int fd, alarmCount = 0;
 extern LinkLayer l;
 extern unsigned int alarmEnabled;
 extern int maxNTries, sequenceNumber;
+unsigned char control[5];
+unsigned char retransmit = TRUE;
 
 void alarmHandler(int signal);
 void sendFrame(unsigned char a, unsigned char ctr, int triggerAlarm);
-void receiveFrame(int senderStatus, unsigned char ctr);
+void receiveFrame(int senderStatus, unsigned char ctr, unsigned char *control);
 unsigned char *byteStuffing(unsigned char *frame, unsigned int *length);
 void receiveRREJ(int fd, unsigned char rr_control, unsigned char rej_control, unsigned char *frame, unsigned int frameSize);
 unsigned char *byteDestuffing(unsigned char *data, unsigned int *size);
@@ -102,12 +104,18 @@ int llopen(LinkLayer connectionParameters)
     }
 
     if(l.role == 0){
+        printf("start");
         sendFrame(SET_A, SET_C, TRUE);                            // in this case the transmitter is sending a SET frame and then receiving a UA frame
-        receiveFrame(RECEIVER, UA_C);
+        printf("sent frame");
+        receiveFrame(RECEIVER, UA_C, control);
+        printf("received frame");
     }
     else if(l.role == 1){
-        receiveFrame(TRANSMITTER, SET_C);                         // in this case the receiver is receiving a SET frame and then sending a UA frame
+        printf("start");
+        receiveFrame(TRANSMITTER, SET_C, control);                         // in this case the receiver is receiving a SET frame and then sending a UA frame
+        printf("received frame");
         sendFrame(UA_A, UA_C, FALSE);
+        printf("sent frame");
     } 
 
     return 1;
@@ -151,6 +159,7 @@ int llwrite(const unsigned char *buf, int bufSize){
 
     stuffedFrame[totalLength - 2] = BBC;
 
+    printf("entered llwrite");
     alarm(l.timeout);
 
     if(sequenceNumber == 0){
@@ -275,13 +284,13 @@ int llclose(int showStatistics)
 {
     if(l.role == TRANSMITTER){
         sendFrame(SET_A, 0x0B, TRUE);
-        receiveFrame(RECEIVER, 0x0B);
+        receiveFrame(RECEIVER, 0x0B, control);
         sendFrame(SET_A, UA_C, FALSE);
     }
     else if(l.role == RECEIVER){
-        receiveFrame(TRANSMITTER, 0x0B);
+        receiveFrame(TRANSMITTER, 0x0B, control);
         sendFrame(UA_A, 0x0B, TRUE);
-        receiveFrame(TRANSMITTER, UA_C);
+        receiveFrame(TRANSMITTER, UA_C, control);
     }
 
     return 1;
@@ -290,52 +299,65 @@ int llclose(int showStatistics)
 void alarmHandler(int signal){
     alarmEnabled = FALSE;
     alarmCount++;
+    retransmit = TRUE;
 
     printf("Alarm #%d\n", alarmCount);
 }
 
 void sendFrame(unsigned char a, unsigned char ctr, int triggerAlarm){
-    int controlSize = 5;
-    unsigned char control[controlSize];
     control[0] = FLAG;
     control[1] = a;
     control[2] = ctr;
     control[3] = control[1] ^ control[2];
     control[4] = FLAG;
-    int res = write(fd, control, controlSize);
+    int res = write(fd, control, 5);
 
     if(res < 0){
-        printf("\nERROR WRITING FRAME\n");
+        printf("\nERROR WRITING FRAME in sendFrame\n");
         return ;
     }
 
-    if(triggerAlarm){
-        alarm(l.timeout);
-    }
 }
 
-void receiveFrame(int senderStatus, unsigned char ctr){
+void receiveFrame(int senderStatus, unsigned char ctr, unsigned char *control){
     StateMachine state = START;
     int res;
     unsigned char byte, byte_A;
 
     while(state != STOP){
+
+        if (control != NULL) {
+            if (retransmit) {
+                if (l.nRetransmissions == 0) {
+                printf("\nNo more retransmissions, leaving...\n");
+                exit(-1);
+                }
+                res = write(fd, retransmit, 5);
+                l.nRetransmissions--;
+                alarm(l.timeout);
+                retransmit = FALSE;
+                printf("veio ao retransmit");
+            }
+        }
+
         res = read(fd, &byte, 1);
         if(res < 0){
-            printf("\nREADING ERROR\n");
+            printf("\nREADING ERROR in receiveFrame\n");
             return ;
         }
 
         switch(state){
             case START:
-                if(byte==FLAG)
+                if(byte==FLAG){
                     state = FLAG_RCV;
+                    printf("FLAG");}
                 break;
             case FLAG_RCV:
                 if(senderStatus == TRANSMITTER){
                     if(byte == SET_A){
                         state = A_RCV;
                         byte_A = byte;
+                        printf("FLAG_RCV");
                     }
                     else if(byte == FLAG)
                         state = FLAG_RCV;
@@ -373,9 +395,12 @@ void receiveFrame(int senderStatus, unsigned char ctr){
                 else state = START;
                 break;
             default:
+            printf("default");
+            retransmit = TRUE;
             break;
         }
     } 
+    return ;
 }
 
 unsigned char *byteStuffing(unsigned char *frame, unsigned int *length){
@@ -424,6 +449,7 @@ void receiveRREJ(int fd, unsigned char rr_control, unsigned char rej_control, un
             }
         res = write(fd, frame, frameSize);
             l.nRetransmissions--;
+            printf("entered receiveRREJ");
             alarm(l.timeout);
             retransmit = FALSE;
         }
@@ -455,6 +481,7 @@ void receiveRREJ(int fd, unsigned char rr_control, unsigned char rej_control, un
             if (byte == rr_control) {
             controlByte = rr_control;
             receive = C_RCV;
+            printf("entered rreJ case a");
             alarm(0);
             } else if (byte == rej_control) {
             controlByte = rej_control;
@@ -478,6 +505,7 @@ void receiveRREJ(int fd, unsigned char rr_control, unsigned char rej_control, un
         case BCC_OK:
             if (byte == FLAG) {
             receive = STOP;
+            printf("entered receive case bcc");
             alarm(0);
             retransmit = FALSE;
             } else
