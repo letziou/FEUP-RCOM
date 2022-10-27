@@ -5,157 +5,178 @@
 #include <stdio.h>
 #include <string.h>
 
-unsigned char buf[256];
+#define CONTROL_START (0x02)
+#define CONTROL_END (0x03)
+#define CONTROL_DATA (0x01)
+#define TYPE_FILESIZE (0)
 
-#define DATA_CTR 0x01
-#define START_CTR 0x02
-#define END_CTR 0x03
 
-int getValues(unsigned char *buffer, unsigned char* type, unsigned char* length, unsigned char** value);
+unsigned char buffer[256];
 
+int getValues(unsigned char *src, unsigned char* type, unsigned char* length, unsigned char** value);
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)
 {
     LinkLayer l;
-    strcpy(l.serialPort, serialPort);
-        if(strcmp(role, "tx") == 0) l.role = LlTx; 
-        else if(strcmp(role, "rx") == 0) l.role = LlRx;
-        else printf("nERROR IN ROLE\n");
-    l.baudRate = baudRate;
-    l.nRetransmissions = nTries;
-    l.timeout = timeout;
+	l.baudRate = baudRate;
+	l.nRetransmissions = nTries;
+	l.timeout = timeout;
+	strcpy(l.serialPort,serialPort);
 
-    if(llopen(l) < 0){
-        printf("\nERROR IN LLOPEN\n");
-        return ;
+
+    if(strcmp(role,"tx") == 0) {
+		l.role=LlTx;
+		printf("\nI am a transmitter\n");
+    }else if(strcmp(role,"rx") == 0) {
+		l.role=LlRx;
+		printf("\nI am a receiver\n");
+    }else{
+		printf("\n ERROR -- Unknown role, use 'tx' or 'rx'\n");
     }
 
-    if(l.role == LlTx){
-        FILE* file = fopen(filename, "r");
 
-        if(file == 0){
-            printf("\nERROR OPENING FILE\n");
-            return ;
-        }
+	if(llopen(l) < 0){
+		printf("\n ERROR -- Could not open connection\n");
+		llclose(0);
+		return -1;
+	}
 
-        fseek(file, 0, SEEK_END);               // seek to end of file
-        long int fileSize = ftell(file);        // get current file pointer
-        fseek(file, 0, SEEK_SET);               // seek back to beginning of file
+	if(l.role == LlTx) {
+		FILE* file = fopen(filename,"r");
 
-        buf[0] = START_CTR;
-        buf[1] = 0;
-        buf[2] = sizeof(long);
+		if(file == FALSE){
+			printf("\n ERROR -- Could not open file\n");
+			return -1;
+		}
+  		
 
-        *(long*)(buf+3) = fileSize;
-        llwrite(buf, 10);
+		fseek(file,0L,SEEK_END);
+		long int fileSize = ftell(file);
+		fseek(file,0,SEEK_SET);
 
-        unsigned char fail = FALSE;
-        unsigned long bytesPassed = 0;
+		buffer[0] = CONTROL_START;
+		buffer[1] = TYPE_FILESIZE;
+		buffer[2] = sizeof(long);
 
-        for(unsigned char i=0; bytesPassed<fileSize ;++i){
-            int quantity = fileSize - bytesPassed < MAX_PAYLOAD_SIZE ? fileSize - bytesPassed : MAX_PAYLOAD_SIZE;
-            unsigned long fileBytes = fread(buf+4, 1, quantity, file);
+		*(long*)(buffer+3) = fileSize;
+		llwrite(buffer,10);
 
-            if(fileBytes != quantity){
-                printf("\nERROR -- FAILURE READING FILE");
-                fail = TRUE;
+		unsigned char fFlag = 0;
+		unsigned long bytesTransmitted = 0;
+
+		for(unsigned char i = 0; bytesTransmitted < fileSize;++i){
+			int quant = fileSize - bytesTransmitted < (MAX_PAYLOAD_SIZE)? fileSize - bytesTransmitted : (MAX_PAYLOAD_SIZE);
+			unsigned long fileBytes = fread(buffer + 4, 1, quant, file);
+
+			if(fileBytes != quant){
+                printf("\n ERROR -- File read failure\n");
+                fFlag=TRUE;
                 break;
             }
 
-            buf[0] = DATA_CTR;
-            buf[1] = i;
-            buf[2] = fileBytes >> 8;
-            buf[3] = fileBytes % 256;
+			buffer[0] = CONTROL_DATA;
+			buffer[1] = i;
+			buffer[2] = fileBytes >> 8;
+			buffer[3] = fileBytes % 256;
 
-            if(llwrite(buf, fileBytes+4) < 0){
-                printf("\nERROR -- FAILURE WRITING USING LLWRITE\n");
-                fail = TRUE;
-                break;
-            }
-            else printf("\nSENT PACKET WITH %d BYTES\n", quantity);
-            bytesPassed += quantity;
-        }
+			if(llwrite(buffer, fileBytes + 4) < 0){
+				printf("\n ERROR -- Failure on writing\n");
+				fFlag = TRUE;
+				break;
+			}else{
+				printf("Sent packet with this many bytes: %d\n", quant);
+			}
+			bytesTransmitted += quant; 
+		}
+		if(fFlag == FALSE){
+			buffer[0] = CONTROL_END;
 
-        if(fail == FALSE){
-            buf[0] = END_CTR;
-            if(llwrite(buf, 1) < 0) printf("\nERROR -- FAILURE SENDING END PACKET\n");
-        }
-        fclose(file);
-    }
-    else if(l.role == LlRx){
-        long int fileSize = 0, fileSizeReceived = 0;
-        int bytesRead = llread(buf);
-        unsigned char t, l, *v;
+			if(llwrite(buffer, 1) < 0){
+				printf("\n ERROR -- Failure on end of packet\n");
+			}else{
+				printf("\nSucess on send\n");
+			}
+		}fclose(file);
 
-        if(buf[0] == START_CTR){
-            int offset = 1;
-            unsigned char EARLY = FALSE, lastNumber = 0;
+	}else if(l.role == LlRx){
+		long int fileSize = 0 , fileSizeReceived = 0;
+		int readBytes = llread(buffer);
+		unsigned char t,l,*v;
 
-            while(offset < bytesRead){
-                offset += getValues(buf+offset, &t, &l, &v);
-                if(t == 0){
-                    fileSize = *((unsigned long*)v);
-                    printf("\nFILESIZE %li\n", fileSize);
-                }
-            }
+		if(buffer[0] == CONTROL_START){
+			int offset = 1;
+			unsigned char fEarly = FALSE, lastNumber = 0;
 
-            FILE* file = fopen(filename, "w");
-            if(file == FALSE){
-                printf("\nERROR -- FAILURE TO OPEN FILE IN LLRX\n");
-                return ;
-            }
+			while(offset < readBytes){
+				offset += getValues(buffer+offset, &t, &l, &v);
+				if(t == TYPE_FILESIZE){
+					fileSize = *((unsigned long*)v);
+					printf("Filesize:%li\n",fileSize);
+					}
+			}
+			
+
+			FILE* file = fopen(filename, "w");
+			if(file == FALSE) {		
+				printf("\n ERROR -- Could not open file\n");
+				return;
+			} 
 
             while(fileSizeReceived < fileSize){
-                int nBytes = llread(buf);
+                int nBytes = llread(buffer);
                 if(nBytes < 1){
-                    if(nBytes == -1) printf("\nERROR -- LLREAD\n"); 
-                    else printf("\nERROR -- RECEIVED PACKET TOO SMALL\n"); 
+                    if(nBytes == -1) printf("\n ERROR -- Error on llread\n");
+                    else printf("\n ERROR -- Received a packet that is too small\n");
                 }
-
-                if(buf[0] == END_CTR){
-                    printf("\nERROR -- ENDED BEFORE EOF\n");
-                    EARLY = TRUE;
+                if(buffer[0] == CONTROL_END){
+                    printf("\n ERROR -- Disconnected before EOF\n");
+                    fEarly = TRUE;
                     break;
                 }
+                if(buffer[0] == CONTROL_DATA){
+                    if(nBytes < 5) printf("\n ERROR -- Received a packet that is too small to be correct with nBytes: \n" + nBytes);
 
-                if(buf[0] == DATA_CTR){
-                    if(nBytes < 5) printf("\nERROR -- RECEIVED PACKET TOO SMALL\n");
-                    if(buf[1] != lastNumber) printf("\nERROR -- RECEIVED PACKET WITH WRONG SEQUENCE NUMBER\n");
+                    if(buffer[1] != lastNumber) printf("\n ERROR -- Received a packet that is too small to be correct\n");
+
                     else{
-                        unsigned long size = buf[3] + buf[2] * 256;
-                        if(size != nBytes-4) printf("\nERROR -- RECEIVED PACKET SIZE DOES NOT EQUAL HEADER\n");
-                        fwrite(buf+4, 1, size, file);
-                        fileSizeReceived += size;
-                        lastNumber++;
+                        unsigned long size = buffer[3] + buffer[2] * 256;
+                        if(size != nBytes-4) printf("\n ERROR -- Received packet size doesnt match header's info\n");
+
+						fwrite(buffer + 4, 1, size, file);
+						fileSizeReceived += size;
+						lastNumber++;
+					
+						printf("Received packet with number: %d\n", buffer[1]);
                     }
                 }
             }
-            fclose(file);
+			fclose(file);
 
-            if(EARLY == TRUE){
-                int nBytes = llread(buf);
+			if(fEarly == FALSE){
+                int nBytes = llread(buffer);
                 if(nBytes < 1){
-                    if(nBytes == -1) printf("\nERROR -- LLREAD IN EARLY==TRUE\n");
-                    else printf("\nERROR -- RECEIVED PACKET TOO SMALL IN EARLY==TRUE\n");
+                    if(nBytes == -1){
+						printf("\n ERROR -- On llread\n");
+					}else printf("\n ERROR -- Received a packet that is too small to be correct\n");
                 }
-
-                if(buf[0] != END_CTR) printf("\nERROR -- RECEIVED WRONG PACKET\n");
-                else printf("\nRECEIVED END PACKET\n");
-            }
+                if(buffer[0] != CONTROL_END){
+                    printf("\n ERROR -- Received wrong type of packet\n");
+                }else{
+                    printf("\nReceived end packet\n");
+                }
+            }	
         }
-        else{
-            printf("\nERROR -- DID NOT START WITH START PACKET\n");
-        }
-    }
-
-    llclose(0);
-    sleep(1);
+        else printf("\nERROR -- Transmission didn't start with a start packet.\n");
+		
+		}
+	llclose(0);
+	sleep(1);
 }
 
-int getValues(unsigned char *buffer, unsigned char* type, unsigned char* length, unsigned char** value){
-    *type = buffer[0];
-    *length = buffer[1];
-    *value = buffer + 2;
+int getValues(unsigned char *src, unsigned char* type, unsigned char* length, unsigned char** value){
+	*type = src[0];
+	*length = src[1];
+	*value = src + 2;
 
     return 2 + *length;
 }
