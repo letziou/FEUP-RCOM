@@ -293,8 +293,82 @@ int llread(unsigned char *packet)
 ////////////////////////////////////////////////
 int llclose(int showStatistics)
 {
-    // TODO
+    signal(SIGALRM, alarm_handler);
+    alarmCount = 0;
 
+    if(l.role == LlTx){
+        int DISC_Received = FALSE;
+        while(DISC_Received == FALSE && alarmCount < l.nRetransmissions){
+            alarm(l.timeout);
+            alarmEnabled = TRUE;
+            if(alarmCount > 0) printf("\nERROR -- TIMED OUT\n");
+            int size = buildFrame(buf, SET_A, DISC_C);
+            write(fd, buf, size);
+            printf("\nLLCLOSE SENT DISC\n");
+
+            while(alarmEnabled == TRUE && DISC_Received == FALSE){
+                int bytesRead = read(fd, buf, packetSize);
+                if(bytesRead < 0){
+                    printf("\nERROR -- READING IN LLCLOSE LLTX SIDE\n");
+                    return -1;
+                }
+                for(int i=0; i<bytesRead && DISC_Received==FALSE ; ++i){
+                    stateMachine(buf[i], &frame);
+                    if(frame.current == END_RCV && frame.adr == SET_A && frame.ctr == DISC_C)
+                        DISC_Received = TRUE;
+                }
+            }
+        }
+        if(DISC_Received == TRUE) printf("\nLLCLOSE RECEIVED DISC\n");
+        int frameSize = buildFrame(buf, SET_A, UA_C);
+        write(fd, buf, frameSize);
+        printf("\nLLCLOSE SENT UA\nGOODBYE\n");
+        sleep(1);
+    }
+    else {
+        while(DISC_Received == FALSE){
+            int bytesRead = read(fd, buf, packetSize);
+            if(bytesRead < 0){
+                printf("\nERROR -- READING IN LLCLOSE LLTX SIDE\n");
+                return -1;
+            }
+            for(int i=0; i<bytesRead && DISC_Received == FALSE ;++i){
+                stateMachine(buf[i], &frame);
+                if(frame.current == END_RCV && frame.adr == SET_A && frame.ctr == DISC_C)
+                    DISC_Received = TRUE;
+            }
+        }
+
+        if(DISC_Received == TRUE) printf("\nLLCLOSE RECEIVED DISC\n");
+        int frameSize = buildFrame(buf, SET_A, DISC_C);
+        write(fd, buf, frameSize);
+        printf("\nLLCLOSE SENT DISC\n");
+
+        int recUA = FALSE;
+
+        while(recUA == FALSE){
+            int bytesRead = read(fd, buf, packetSize);
+            if(bytesRead < 0){
+                printf("\nERROR -- READING IN LLCLOSE LLRX SIDE\n");
+                return -1;
+            }
+            for(int i=0;i<bytesRead && recUA == FALSE ; ++i){
+                stateMachine(buf[i], &frame);
+                if(frame.current == END_RCV && frame.adr == SET_A && frame.ctr == UA_C)
+                    recUA = TRUE;
+            }
+        }
+
+        if(recUA == TRUE) printf("\nLLCLOSE RECEIVED UA\n");
+    }
+
+    if (tcsetattr(fd, TCSANOW, &oldtio) == -1)
+    {
+        perror("tcsetattr");
+        exit(-1);
+    }
+
+    close(fd);
     return 1;
 }
 
