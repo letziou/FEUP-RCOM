@@ -37,6 +37,7 @@ struct termios newtio;
 LinkLayer l;
 int fd, alarmCount = 0, alarmEnabled = FALSE;
 unsigned char buf[512];
+unsigned char dataFlag = 0;
 
 typedef enum {
     START,
@@ -65,6 +66,8 @@ Frame frame;
 void alarm_handler();
 int buildFrame(unsigned char* buffer, unsigned char address, unsigned char control);
 void stateMachine(unsigned char byte, Frame *frame);
+int buildDataFrame(unsigned char* frame, const unsigned char* data, unsigned int dataSize, unsigned char adr, unsigned char ctr);
+int byteStuffing(const unsigned char* src, int size, unsigned char* dest, unsigned char *bcc);
 
 ////////////////////////////////////////////////
 // LLOPEN
@@ -73,7 +76,7 @@ int llopen(LinkLayer connectionParameters)
 {
     l = connectionParameters;
     if((fd = open(l.serialPort, O_RDWR | O_NOCTTY)) < 0){
-        printf("\nERROR IN SERIALPORT\n");
+        printf("\nERROR -- SERIALPORT\n");
         return -1;
     }
 
@@ -96,7 +99,7 @@ int llopen(LinkLayer connectionParameters)
 
     // Set new port settings
     if (tcsetattr(fd, TCSANOW, &newtio) == -1) {
-        printf("\nERROR IN TCSETATTR\n");
+        printf("\nERROR -- IN TCSETATTR\n");
         return -1;
     }
 
@@ -110,11 +113,11 @@ int llopen(LinkLayer connectionParameters)
             if(alarmCount > 0) printf("\nTIME UP %d", alarmCount);
             int bufSize = buildFrame(buf, SET_A, SET_C);
             write(fd, buf, bufSize);
-            printf("\nLLOPEN -- SET FRAME SENT\n");
+            printf("\nLLOPEN SET FRAME SENT\n");
             while(recUA == FALSE && alarmEnabled == TRUE){
                 int readSize = read(fd, buf, packetSize);
                 if(readSize < 0){
-                    printf("\nERROR READING IN LLOPEN ON ROLE TX\n");
+                    printf("\nERROR -- READING IN LLOPEN ON ROLE TX\n");
                     return -1;
                 }
                 for(unsigned int i = 0; i < readSize && recUA == FALSE; ++i){
@@ -135,7 +138,7 @@ int llopen(LinkLayer connectionParameters)
         while(recSET == FALSE){
             int readSize = read(fd, buf, packetSize);
             if(readSize < 0){
-                printf("\nERROR READING IN LLOPEN ON ROLE RX\n");
+                printf("\nERROR -- READING IN LLOPEN ON ROLE RX\n");
                 return -1;
             }
             for(unsigned int i = 0; i < readSize && recSET == FALSE; ++i){
@@ -148,7 +151,7 @@ int llopen(LinkLayer connectionParameters)
 
         int frameSize = buildFrame(buf, SET_A, UA_C);
         write(fd, buf, frameSize);
-        printf("\nLLOPEN -- UA FRAME SENT\n");
+        printf("\nLLOPEN UA FRAME SENT\n");
         return 1;
     }
 
@@ -160,7 +163,66 @@ int llopen(LinkLayer connectionParameters)
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize)
 {
-    // TODO
+    unsigned char buffer[bufSize*2+100];
+    int frameSize = buildDataFrame(buffer, buf, bufSize, SET_A, DATA_C(dataFlag));
+
+    for(int i=0; i<frameSize ;){
+        int writeSize = write(fd, buffer+i, frameSize-i);
+        if(writeSize == -1){
+            printf("\nERROR -- WRITING IN LLWRITE\n");
+            return -1;
+        }
+        i += writeSize;
+    }
+
+    int receivePacket = FALSE, resend = FALSE, nRetransmissions = 0;
+    frame.data = NULL;
+
+    alarmEnabled = TRUE;
+    alarm(l.timeout);
+
+    while(receivePacket == FALSE){
+        if(alarmEnabled == FALSE){
+            resend = TRUE;
+            alarmEnabled = TRUE;
+            alarm(l.timeout);
+        }
+        if(resend == TRUE){
+            if(nRetransmissions == l.nRetransmissions){
+                printf("\nERROR -- EXCEED RETRANSMISSION LIMIT\n");
+                return -1;
+            }
+            for(int i=0; i<frameSize ;){
+                int writeSize = write(fd, buffer+i, frameSize-i);
+                if(writeSize == -1){
+                    printf("\nERROR -- WRITING IN LLWRITE\n");
+                    return -1;
+                }
+                i += writeSize;
+            }
+            resend = FALSE;
+            nRetransmissions++;
+        }
+        int readSize = read(fd, buf, packetSize);
+        if(readSize < 0){
+            printf("\nERROR -- READING NOT POSSIBLE\n");
+            return -1;
+        }
+
+        for(int i=0; i<readSize && receivePacket == FALSE ;++i){
+            stateMachine(buf[i], &frame);
+            if(frame.current == END_RCV){
+                if(frame.adr == SET_A && frame.ctr == RR_C(dataFlag)){
+                    receivePacket = TRUE;
+                    break;
+                }
+                if(frame.adr == SET_A && frame.ctr == REJ_C(dataFlag)){
+                    resend = TRUE;
+                    break;
+                }
+            }
+        }
+    }
 
     return 0;
 }
@@ -267,7 +329,7 @@ void stateMachine(unsigned char byte, Frame *frame){
         case ESC_RCV:
             if(byte == FLAG) frame->current = REJ_RCV;
             else if(byte == FLAG_PTR){
-                if(frame->bcc = FLAG) frame->current = BCC2_OK;
+                if(frame->bcc == FLAG) frame->current = BCC2_OK;
                 else{
                     frame->bcc ^= FLAG;
                     frame->data[frame->dataSize++] = FLAG;
@@ -303,4 +365,46 @@ void stateMachine(unsigned char byte, Frame *frame){
             }
             break;
     }
+}
+
+int buildDataFrame(unsigned char* frame, const unsigned char* data, unsigned int dataSize, unsigned char adr, unsigned char ctr){
+    frame[0] = FLAG;
+    frame[1] = adr;
+    frame[2] = ctr;
+    frame[3] = adr ^ ctr;
+
+    int offset;
+    unsigned char bcc = 0;
+    for(int i=0; i<dataSize ; ++i)
+        offset += byteStuffing(data+i, 1, frame+offset+4, &bcc);
+    
+    offset += byteStuffing(&bcc, 1, frame+offset+4, NULL);
+    frame[4+offset] = FLAG;
+    return 5 + offset;
+}
+
+int byteStuffing(const unsigned char* src, int size, unsigned char* dest, unsigned char *bcc){
+    int destSize= 0;
+
+    for(int i=0; i<size; i++){
+        if(bcc != NULL){
+            *bcc ^= src[i];
+        }
+        
+        if(src[i] == ESCAPE) {
+			dest[destSize++] = ESCAPE;
+			dest[destSize++] = ESCAPE_PTR;
+			break;
+		}
+
+		else if(src[i] ==  FLAG) {
+			dest[destSize++] = ESCAPE;
+			dest[destSize++] = FLAG_PTR;
+			break;
+		}else{
+            dest[destSize++] = src[i];
+        }
+    }
+
+    return destSize;
 }
