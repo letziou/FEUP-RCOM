@@ -35,7 +35,7 @@
 struct termios oldtio;
 struct termios newtio;
 LinkLayer l;
-int fd, alarmCount = 0, alarmEnabled = FALSE;
+int fd, alarmCount = 0, alarmEnabled = FALSE, DISC_Received = FALSE;
 unsigned char buf[512];
 unsigned char dataFlag = 0;
 
@@ -232,7 +232,58 @@ int llwrite(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llread(unsigned char *packet)
 {
-    // TODO
+    int receivePacket = FALSE;
+    frame.data = packet;
+
+    while(receivePacket == FALSE){
+        int readSize = read (fd, buf, packetSize);
+        if(readSize < 0){
+            printf("\nERROR -- READING ERROR IN LLREAD\n");
+            return -1;
+        }
+
+        for(int i=0; i<readSize && receivePacket==FALSE ;++i){
+            stateMachine(buf[i], &frame);
+
+            if(frame.current == REJ_RCV && frame.adr == SET_A){
+                int frameSize = buildFrame(buf, SET_A, (frame.ctr == DATA_C(0) ? REJ_C(0) : REJ_C(1)));
+                write(fd, buf, frameSize);
+                printf("\nLLREAD SENT REJ\n");
+            }   
+
+            if(frame.current == END_RCV && frame.adr == SET_A && frame.ctr == SET_C){
+                int frameSize = buildFrame(buf, SET_A, UA_C);
+                write(fd, buf, frameSize);
+                printf("\nLLREAD SENT UA\n");
+            }
+
+            if(frame.current == END_RCV && frame.adr == SET_A){
+                if(frame.ctr == DATA_C(0)){
+                    int frameSize = buildFrame(buf, SET_A, RR_C(0));
+                    write(fd, buf, frameSize);;
+                    printf("\nLLREAD SENT RR %d\n", dataFlag);
+                    return frame.dataSize;
+                }
+                else if(frame.ctr == DATA_C(1)){
+                    int frameSize = buildFrame(buf, SET_A, RR_C(1));
+                    write(fd, buf, frameSize);;
+                    printf("\nLLREAD SENT RR %d\n", dataFlag);
+                    return frame.dataSize;
+                }
+                else{
+                    int frameSize = buildFrame(buf, SET_A, RR_C(0));
+                    write(fd, buf, frameSize);;
+                    printf("\nLLREAD SENT RR %d\n", dataFlag);
+                }
+            }
+
+            if(frame.ctr == DISC_C){
+                DISC_Received = TRUE;
+                printf("\nLLREAD RECEIVED DISC\n");
+                return -1;
+            }
+        }
+    }
 
     return 0;
 }
