@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
 
     const char *serialPort = argv[1];
     const char *role = argv[2];
-    char *filename = argv[3];
+    const char *filename = argv[3];
 
     printf("Starting link-layer protocol application\n"
            "  - Serial port: %s\n"
